@@ -66,7 +66,7 @@ async function refreshAccessToken(userId) {
       try {
         spotifyApi.setRefreshToken(userTokens[userId].refreshToken);
         const data = await spotifyApi.refreshAccessToken();
-        console.log("Refresh response:", data);
+        console.log("Refresh response:", data.body.access_token);
 
         const newAccessToken = data.body["access_token"];
         const newRefreshToken = data.body["refresh_token"];
@@ -80,10 +80,26 @@ async function refreshAccessToken(userId) {
         spotifyApi.setAccessToken(newAccessToken);
         console.log("Access token refreshed successfully");
       } catch (refreshErr) {
-        console.error("Error refreshing access token:", refreshErr);
+        if (refreshErr.body && refreshErr.body.error === "invalid_grant") {
+          console.error(
+            "Refresh token revoked, user needs to reauthenticate:",
+            refreshErr
+          );
+          delete userTokens[userId];
+          writeAccessToken();
+          const authUrl = await spotifyApi.createAuthorizeURL(
+            ["user-top-read"],
+            userId
+          );
+          client.users.cache
+            .get(userId)
+            .send(
+              `Your Spotify session has expired. Please reauthenticate by clicking [here](${authUrl}).`
+            );
+        } else {
+          console.error("Error refreshing access token:", refreshErr);
+        }
       }
-    } else {
-      console.error("Error setting access token:", error);
     }
   }
 }
@@ -157,72 +173,81 @@ async function handleAuthenticatedUser(message) {
     message.channel.send("Failed to fetch top artists.");
   }
 
-  const clipSelection = await waitForUserResponse(message);
-  const selectedClipIndex = parseInt(clipSelection.content) - 1;
-  const selectedArtists = topArtists[selectedClipIndex];
-
-  const trackObjectsArr = await getRandomTracks(selectedArtists.id);
-
-  let files = [];
-  let correctCustomId = "";
-  let correctName = "";
-  const labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
-  const row = new ActionRowBuilder();
-
-  trackObjectsArr.map(async (trackObject, index) => {
-    if (trackObject.isCorrect) {
-      correctCustomId = `option ${labels[index]}`;
-      correctName = trackObject.track.name;
-      files = [
-        {
-          attachment: `${trackObject.track.preview_url}.mp3`,
-          name: "preview.mp3",
-        },
-      ];
-    }
-  });
-
-  trackObjectsArr.map((trackObject, index) => {
-    row.addComponents(
-      new ButtonBuilder()
-        .setCustomId(`option ${labels[index]}`)
-        .setLabel(`${labels[index]}. ${trackObject.track.name}`)
-        .setStyle(ButtonStyle.Secondary)
-    );
-  });
-
-  const response = await message.channel.send({
-    content: `choose the correct name of the clip\n${message.author}`,
-    components: [row],
-    files: files,
-  });
-
-  try {
-    const confirmation = await response.awaitMessageComponent({
-      filter: (_) => true,
-      time: 60_000,
-    });
-    if (confirmation.customId === correctCustomId) {
-      confirmation.update({ components: [] });
-      await message.channel.send(
-        `Correct! The correct name of the clip is ${correctName}`
-      );
-    } else {
-      await confirmation.update({ components: [] });
-      await message.channel.send(
-        `Wrong! The correct name of the clip is ${correctName}`
-      );
-    }
-    handleAuthenticatedUser();
-  } catch (e) {
-    console.log(e);
-    await response.edit({
-      content: "You took too long to respond!",
-      components: [],
-    });
-  }
+  getUserQuery(message, topArtists);
 }
 
+async function getUserQuery(message, topArtists) {
+  try {
+    let trackObjectsArr = [];
+
+    const clipSelection = await waitForUserResponse(message);
+    const selectedClipIndex = parseInt(clipSelection.content) - 1;
+    const selectedArtists = topArtists[selectedClipIndex];
+
+    trackObjectsArr = await getRandomTracks(selectedArtists.id);
+
+    let files = [];
+    let correctCustomId = "";
+    let correctName = "";
+    const labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+    const row = new ActionRowBuilder();
+
+    trackObjectsArr.map(async (trackObject, index) => {
+      if (trackObject.isCorrect) {
+        correctCustomId = `option ${labels[index]}`;
+        correctName = trackObject.track.name;
+        files = [
+          {
+            attachment: `${trackObject.track.preview_url}.mp3`,
+            name: "preview.mp3",
+          },
+        ];
+      }
+    });
+
+    trackObjectsArr.map((trackObject, index) => {
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`option ${labels[index]}`)
+          .setLabel(`${labels[index]}. ${trackObject.track.name}`)
+          .setStyle(ButtonStyle.Secondary)
+      );
+    });
+
+    const response = await message.channel.send({
+      content: `choose the correct name of the clip\n${message.author}`,
+      components: [row],
+      files: files,
+    });
+
+    try {
+      const confirmation = await response.awaitMessageComponent({
+        filter: (_) => true,
+        time: 60_000,
+      });
+      if (confirmation.customId === correctCustomId) {
+        confirmation.update({ components: [] });
+        await message.channel.send(
+          `Correct! The correct name of the clip is ${correctName}`
+        );
+      } else {
+        await confirmation.update({ components: [] });
+        await message.channel.send(
+          `Wrong! The correct name of the clip is ${correctName}`
+        );
+      }
+    } catch (e) {
+      console.log(e);
+      await response.edit({
+        content: "You took too long to respond!",
+        components: [],
+      });
+    }
+  } catch (err) {
+    console.log(`ERROR collecting the tracks object ${err}`);
+    message.channel.send("ERROR collecting the tracks Please try again");
+  }
+}
 function waitForUserResponse(message) {
   return new Promise((resolve) => {
     const filter = (response) => response.author.id === message.author.id;
